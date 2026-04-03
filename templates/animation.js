@@ -1,10 +1,9 @@
-const micBtn = document.getElementById('micBtn');
-const textInput = document.querySelector('input[name="sen"]');
+const micBtn = document.getElementById("micBtn");
 
 let mediaRecorder;
 let audioChunks = [];
 
-if (micBtn && textInput) {
+if (micBtn) {
     micBtn.addEventListener("click", async () => {
         try {
             const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
@@ -12,32 +11,32 @@ if (micBtn && textInput) {
             mediaRecorder = new MediaRecorder(stream);
             audioChunks = [];
 
-            mediaRecorder.ondataavailable = e => {
-                audioChunks.push(e.data);
+            mediaRecorder.ondataavailable = event => {
+                audioChunks.push(event.data);
             };
 
             mediaRecorder.onstop = async () => {
-                const audioBlob = new Blob(audioChunks, { type: "audio/webm" }); // ✅ FIX
+                const audioBlob = new Blob(audioChunks, { type: "audio/wav" });
 
                 const formData = new FormData();
-                formData.append("audio", audioBlob, "speech.webm"); // ✅ correct name
+                formData.append("audio", audioBlob, "speech.wav");
 
-                const res = await fetch("/speech_to_text", {
+                const response = await fetch("/speech_to_text", {
                     method: "POST",
                     body: formData
                 });
 
-                const data = await res.json();
+                const data = await response.json();
 
                 if (data.text) {
-                    textInput.value = data.text;
+                    document.querySelector('input[name="sen"]').value = data.text;
                 } else {
-                    alert(data.error);
+                    alert("Error: " + data.error);
                 }
             };
 
             mediaRecorder.start();
-            micBtn.innerText = "⏹️ Recording...";
+            micBtn.innerText = "⏹️";
 
             setTimeout(() => {
                 mediaRecorder.stop();
@@ -45,8 +44,8 @@ if (micBtn && textInput) {
             }, 3000);
 
         } catch (err) {
-            console.error(err);
             alert("Mic permission denied or not working");
+            console.error(err);
         }
     });
 }

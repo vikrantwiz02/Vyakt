@@ -55,56 +55,91 @@
 
 {% block extra_js %}
 <script src="{{ url_for('static', filename='js/pages/animation.js') }}"></script>
-<script>
-  // Embedded playlist logic for the video player
-  // Passing the list of video URLs to JavaScript
-  {% if words %}
-  document.addEventListener('DOMContentLoaded', () => {
-    const videoPlayer = document.getElementById('signVideo');
-    const currentWordDisplay = document.getElementById('currentWordDisplay');
 
-    // Create array of objects: { word: "hello", url: "..." }
-    const playlist = [
-      {% for word in words %}
-            {
+<script>
+{% if words %}
+document.addEventListener('DOMContentLoaded', () => {
+
+  const videoPlayer = document.getElementById('signVideo');
+  const currentWordDisplay = document.getElementById('currentWordDisplay');
+
+  // Playlist
+  const playlist = [
+    {% for word in words %}
+    {
       word: "{{ word }}",
-      // Logic: check if it matches a known asset pattern or assume it's in assets/
-      // app.py returns 'filtered' words which map to filenames usually.
       url: "{{ url_for('static', filename='assets/' + word + '.mp4') }}"
     },
     {% endfor %}
-        ];
+  ];
 
   let index = 0;
+  let currentAudio = null;
 
+  // 🔊 Speak function (ElevenLabs)
+  function speakText(word) {
+    fetch("/text_to_speech", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify({ text: word })
+    })
+    .then(res => res.json())
+    .then(data => {
+      if (data.audio_url) {
+
+        // Stop previous audio cleanly
+        if (currentAudio) {
+          currentAudio.pause();
+          currentAudio.currentTime = 0;
+        }
+
+        currentAudio = new Audio(data.audio_url);
+        currentAudio.play();
+      }
+    })
+    .catch(err => console.error("TTS error:", err));
+  }
+
+  // 🎬 Play videos + 🔊 voice sync
   function playNext() {
     if (index < playlist.length) {
+
       const item = playlist[index];
+
       videoPlayer.src = item.url;
       currentWordDisplay.textContent = `Signing: "${item.word}"`;
-      videoPlayer.play().catch(e => console.log("Autoplay blocked"));
+
+      videoPlayer.play()
+        .then(() => {
+          // 🔥 Slight delay for better sync
+          setTimeout(() => speakText(item.word), 300);
+        })
+        .catch(e => console.log("Autoplay blocked"));
+
       index++;
+
     } else {
-      // Determine if we loop or stop
-      index = 0; // Loop? Or stop.
-      // For now, stop.
-      // currentWordDisplay.textContent = "Finished";
+      index = 0; // reset (optional loop)
     }
   }
 
+  // When one video ends → next
   videoPlayer.addEventListener('ended', playNext);
 
-  // Start playing
-  if (playlist.length > 0) {
-    playNext();
-  }
-
-  // Handle error (skip missing videos)
+  // Handle missing video
   videoPlayer.addEventListener('error', () => {
     console.log("Video not found, skipping...");
     playNext();
   });
-    });
-  {% endif %}
+
+  // Start
+  if (playlist.length > 0) {
+    playNext();
+  }
+
+});
+{% endif %}
 </script>
 {% endblock %}

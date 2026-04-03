@@ -1,18 +1,20 @@
 import cv2
 import os
+import requests
+os.environ["PATH"] += os.pathsep + "C:\\Users\\hp\\Downloads\\ffmpeg-8.1-essentials_build\\ffmpeg-8.1-essentials_build\\bin"
 import re
 import tempfile
 import json
 import wave
 import time
-import threading
 from pathlib import Path
 import uuid
 from collections import deque
 from dotenv import load_dotenv
-
+import speech_recognition as sr
 from flask import Flask, render_template, redirect, request, url_for, flash, session, Response, g, jsonify
 from flask_mysqldb import MySQL
+from num2words import num2words
 from flask_wtf import FlaskForm
 from wtforms import StringField, PasswordField, SubmitField
 from wtforms.validators import DataRequired, Email, EqualTo, Length
@@ -20,8 +22,16 @@ from werkzeug.security import generate_password_hash, check_password_hash
 from werkzeug.utils import secure_filename
 import torch
 import numpy as np
+import threading
+camera_lock = threading.Lock()
+latest_prediction = ""
+captured_sequence = []
+is_capturing = False
 from Model.features import FEATURE_SIZE, SEQUENCE_LENGTH, extract_landmark_features, normalize_sequence
 from Model.gesture_model import GestureTransformer
+from pydub import AudioSegment
+AudioSegment.converter = "C:\\Users\\hp\\Downloads\\ffmpeg-8.1-essentials_build\\ffmpeg-8.1-essentials_build\\bin\\ffmpeg.exe"
+AudioSegment.ffprobe = "C:\\Users\\hp\\Downloads\\ffmpeg-8.1-essentials_build\\ffmpeg-8.1-essentials_build\\bin\\ffprobe.exe"
 
 # Load environment variables from .env file
 load_dotenv()
@@ -509,183 +519,75 @@ def speech_to_text():
         return jsonify({"error": "No audio file provided"}), 400
 
     try:
-        import speech_recognition as sr
-    except ImportError:
-        return jsonify({
-            "error": "speech_recognition is not installed. Install with: pip install SpeechRecognition"
-        }), 501
+        # Save WEBM file
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".webm") as tmp:
+            input_path = tmp.name
+            audio_file.save(input_path)
 
-    filename = audio_file.filename or "speech.wav"
-    suffix = Path(filename).suffix.lower() or ".wav"
-    input_path = None
+        # Convert WEBM → WAV
+        wav_path = input_path.replace(".webm", ".wav")
 
-    try:
-        with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp_file:
-            input_path = Path(tmp_file.name)
-            audio_file.save(str(input_path))
+        audio = AudioSegment.from_file(input_path, format="webm")
+        audio.export(wav_path, format="wav", parameters=["-ac", "1", "-ar", "16000"])
 
-        if suffix != ".wav":
-            return jsonify({
-                "error": "Unsupported format. Upload WAV audio only."
-            }), 415
-
-        offline_text = _transcribe_with_vosk(input_path)
-        if offline_text:
-            return jsonify({"text": offline_text, "engine": "vosk"})
-
+        # Speech Recognition
         recognizer = sr.Recognizer()
-        with sr.AudioFile(str(input_path)) as source:
+        with sr.AudioFile(wav_path) as source:
             audio_data = recognizer.record(source)
 
-        try:
-            text = recognizer.recognize_sphinx(audio_data)
-            if text:
-                return jsonify({"text": text, "engine": "sphinx"})
-        except Exception:
-            pass
-
-        # Final fallback: online recognizer.
         text = recognizer.recognize_google(audio_data)
-        return jsonify({"text": text, "engine": "google"})
 
-    except sr.UnknownValueError:
-        return jsonify({"error": "Could not understand the audio"}), 422
-    except sr.RequestError as exc:
-        return jsonify({"error": f"Speech service is unavailable: {exc}"}), 503
-    except Exception as exc:
-        return jsonify({"error": f"Speech processing failed: {exc}"}), 500
-    finally:
-        if input_path and input_path.exists():
-            try:
-                input_path.unlink()
-            except OSError:
-                pass
+        return jsonify({"text": text})
 
+    except Exception as e:
+        return jsonify({"error": f"Speech processing failed: {str(e)}"}), 500
+@app.route('/text_to_speech', methods=['POST'])
+def text_to_speech():
+    if 'username' not in session:
+        return jsonify({"error": "Unauthorized"}), 401
 
-def _transcribe_with_vosk(wav_path):
-    model_path = os.getenv("VOSK_MODEL_PATH", "").strip()
-    if not model_path:
-        return None
+    data = request.get_json()
+    text = data.get("text", "")
+
+    if not text:
+        return jsonify({"error": "No text provided"}), 400
 
     try:
-        import vosk
-    except ImportError:
-        return None
+        api_key = os.getenv("ELEVENLABS_API_KEY")
 
-    model_dir = Path(model_path)
-    if not model_dir.exists():
-        return None
+        url = "https://api.elevenlabs.io/v1/text-to-speech/JBFqnCBsd6RMkjVDRZzb"
 
-    try:
-        with wave.open(str(wav_path), "rb") as wf:
-            if wf.getnchannels() != 1 or wf.getsampwidth() != 2 or wf.getcomptype() != "NONE":
-                return None
+        headers = {
+            "xi-api-key": api_key,
+            "Content-Type": "application/json"
+        }
 
-            rec = vosk.KaldiRecognizer(vosk.Model(str(model_dir)), wf.getframerate())
-            while True:
-                data = wf.readframes(4000)
-                if len(data) == 0:
-                    break
-                rec.AcceptWaveform(data)
+        payload = {
+            "text": text,
+            "model_id": "eleven_multilingual_v2"
+        }
 
-            final_result = json.loads(rec.FinalResult())
-            text = final_result.get("text", "").strip()
-            return text or None
-    except Exception:
-        return None
+        response = requests.post(url, json=payload, headers=headers)
 
+        if response.status_code != 200:
+            return jsonify({"error": "TTS failed"}), 500
 
+        # Save audio
+        filename = f"{uuid.uuid4()}.mp3"
+        filepath = os.path.join("static", filename)
+
+        with open(filepath, "wb") as f:
+            f.write(response.content)
+
+        return jsonify({"audio_url": url_for('static', filename=filename)})
+
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
 # Video Stream Routes
 MODEL_CHECKPOINT = Path(os.getenv("GESTURA_MODEL_PATH", "Model/artifacts/gesture_transformer_126.pth"))
 MODEL_DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 CAMERA_INDEX = int(os.getenv("GESTURA_CAMERA_INDEX", "0"))
-CAMERA_INDEXES_ENV = os.getenv("GESTURA_CAMERA_INDEXES", "")
-CAMERA_PROBE_MAX = int(os.getenv("GESTURA_CAMERA_PROBE_MAX", "5"))
-CAMERA_PROBE_ALL = os.getenv("GESTURA_CAMERA_PROBE_ALL", "0").strip().lower() in {"1", "true", "yes", "on"}
-CAMERA_BACKENDS_ENV = os.getenv("GESTURA_CAMERA_BACKENDS", "").strip()
-
-
-def _parse_camera_indices():
-    indices = []
-    if CAMERA_INDEXES_ENV.strip():
-        for raw in CAMERA_INDEXES_ENV.split(","):
-            token = raw.strip()
-            if token.isdigit():
-                idx = int(token)
-                if idx not in indices:
-                    indices.append(idx)
-
-    if not indices:
-        indices = [CAMERA_INDEX]
-    elif CAMERA_INDEX not in indices:
-        indices.insert(0, CAMERA_INDEX)
-
-    if CAMERA_PROBE_ALL:
-        for idx in range(CAMERA_PROBE_MAX):
-            if idx not in indices:
-                indices.append(idx)
-
-    return indices
-
-
-def _parse_camera_backends_env():
-    if not CAMERA_BACKENDS_ENV:
-        return None
-
-    name_to_backend = {
-        "AUTO": None,
-        "ANY": cv2.CAP_ANY,
-        "DSHOW": cv2.CAP_DSHOW,
-        "MSMF": cv2.CAP_MSMF,
-    }
-    result = []
-    for raw in CAMERA_BACKENDS_ENV.split(","):
-        key = raw.strip().upper()
-        if key in name_to_backend:
-            result.append((key, name_to_backend[key]))
-    return result if result else None
-
-
-def _camera_backends():
-    env_backends = _parse_camera_backends_env()
-    if env_backends:
-        return env_backends
-
-    if os.name == "nt":
-        return [
-            ("DSHOW", cv2.CAP_DSHOW),
-            ("MSMF", cv2.CAP_MSMF),
-        ]
-    return [("ANY", cv2.CAP_ANY)]
-
-
-def _open_working_camera():
-    attempts = []
-    indices = _parse_camera_indices()
-
-    for index in indices:
-        for backend_name, backend in _camera_backends():
-            attempts.append(f"{index}:{backend_name}")
-            cap = cv2.VideoCapture(index) if backend is None else cv2.VideoCapture(index, backend)
-            if not cap.isOpened():
-                cap.release()
-                continue
-
-            # Warm up briefly to verify the device can actually produce frames.
-            frame_ok = False
-            for _ in range(20):
-                ret, _frame = cap.read()
-                if ret:
-                    frame_ok = True
-                    break
-                time.sleep(0.05)
-
-            if frame_ok:
-                return cap, index, backend_name, attempts
-
-            cap.release()
-
-    return None, None, None, attempts
+CAMERA_BACKEND = cv2.CAP_DSHOW if os.name == "nt" else cv2.CAP_ANY
 
 
 def load_gesture_model():
@@ -749,163 +651,138 @@ def _yield_error_stream(message: str):
         yield (b'--frame\r\n' b'Content-Type: image/jpeg\r\n\r\n' + frame + b'\r\n')
         time.sleep(0.5)
 
-CAMERA_STREAM_LOCK = threading.Lock()
-
 
 @app.route('/generate_frames')
 def generate_frames():
-    if not CAMERA_STREAM_LOCK.acquire(blocking=False):
-        message = "Camera stream already active in another request. Close other tabs and retry."
-        print(f"Error: {message}")
-        yield from _yield_error_stream(message)
-        return
+    global latest_prediction, is_capturing, captured_sequence
 
     try:
         from mediapipe import solutions as mp_solutions
     except ImportError:
-        message = "mediapipe import failed. Install compatible wheel for this Python version."
-        print(f"Error: {message}")
+        message = "mediapipe import failed."
         yield from _yield_error_stream(message)
-        CAMERA_STREAM_LOCK.release()
         return
 
-    cap, active_index, active_backend, attempts = _open_working_camera()
-    if cap is None:
-        message = (
-            "Cannot open camera. Tried "
-            + ", ".join(attempts[:8])
-            + ". Set GESTURA_CAMERA_INDEX / GESTURA_CAMERA_INDEXES (and optionally GESTURA_CAMERA_BACKENDS)."
-        )
-        print(f"Error: {message}")
-        yield from _yield_error_stream(message)
-        CAMERA_STREAM_LOCK.release()
-        return
-    print(f"Camera opened at index {active_index} using backend {active_backend}")
+    with camera_lock:  # ✅ FIX: prevent multiple access
+        cap = cv2.VideoCapture(0)  # force 0 (works in your case)
 
-    mp_hands = mp_solutions.hands
-    mp_drawing = mp_solutions.drawing_utils
-    hands = None
-    try:
+        if not cap.isOpened():
+            yield from _yield_error_stream("Camera not opening")
+            return
+
+        mp_hands = mp_solutions.hands
+        mp_drawing = mp_solutions.drawing_utils
+
         hands = mp_hands.Hands(
             static_image_mode=False,
             min_detection_confidence=0.5,
             min_tracking_confidence=0.5,
             max_num_hands=2,
         )
-    except Exception as exc:
-        message = f"MediaPipe Hands init failed: {exc}"
-        print(f"Error: {message}")
-        yield from _yield_error_stream(message)
-        cap.release()
-        CAMERA_STREAM_LOCK.release()
-        return
 
-    sequence = deque(maxlen=SEQUENCE_LENGTH)
-    prediction_text = ""
+        sequence = deque(maxlen=SEQUENCE_LENGTH)
+        prediction_text = ""
+        last_added = ""
+
+        try:
+            while True:
+                ret, frame = cap.read()
+                if not ret:
+                    break
+
+                frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                results = hands.process(frame_rgb)
+
+                if results and results.multi_hand_landmarks:
+                    for hand_landmarks in results.multi_hand_landmarks:
+                        mp_drawing.draw_landmarks(frame, hand_landmarks, mp_hands.HAND_CONNECTIONS)
+
+                sequence.append(extract_landmark_features(results))
+
+                if gesture_model is not None and len(sequence) == SEQUENCE_LENGTH:
+                    input_np = normalize_sequence(sequence)
+                    input_tensor = torch.tensor(input_np, dtype=torch.float32).unsqueeze(0)
+
+                    with torch.no_grad():
+                        logits = gesture_model(input_tensor)
+                        pred_idx = int(torch.argmax(logits, dim=1).item())
+
+                    if gesture_labels and pred_idx < len(gesture_labels):
+                        prediction_text = str(gesture_labels[pred_idx])
+                        latest_prediction = prediction_text
+
+                        # ✅ Capture logic (FIXED)
+                        if is_capturing:
+                            if prediction_text != last_added:
+                                captured_sequence.append(prediction_text)
+                                last_added = prediction_text
+
+                if prediction_text:
+                    cv2.putText(
+                        frame,
+                        f"Prediction: {prediction_text}",
+                        (10, 35),
+                        cv2.FONT_HERSHEY_SIMPLEX,
+                        1.0,
+                        (0, 255, 0),
+                        2,
+                        cv2.LINE_AA,
+                    )
+
+                ok, buffer = cv2.imencode('.jpg', frame)
+                if not ok:
+                    continue
+
+                yield (b'--frame\r\n'
+                       b'Content-Type: image/jpeg\r\n\r\n' +
+                       buffer.tobytes() + b'\r\n')
+
+        finally:
+            cap.release()
+            hands.close()
+
+@app.route('/get_prediction')
+def get_prediction():
+    global latest_prediction
+    return jsonify({"text": latest_prediction})
+
+@app.route('/start_capture', methods=['POST'])
+def start_capture():
+    global captured_sequence, is_capturing
+    captured_sequence = []
+    is_capturing = True
+    return jsonify({"status": "started"})
+
+@app.route('/stop_capture', methods=['POST'])
+def stop_capture():
+    global captured_sequence, is_capturing
+
+    is_capturing = False
+
+    if not captured_sequence:
+        return jsonify({
+            "sequence": [],
+            "combined": "",
+            "words": "No input detected"
+        })
+
+    combined = "".join(captured_sequence)  # "123"
 
     try:
-        while True:
-            ret, frame = cap.read()
-            if not ret:
-                cap.release()
-                cap, active_index, active_backend, _ = _open_working_camera()
-                if cap is None:
-                    message = "Camera disconnected during stream."
-                    print(f"Error: {message}")
-                    yield from _yield_error_stream(message)
-                    return
-                print(f"Camera reconnected at index {active_index} using backend {active_backend}")
-                continue
+        number_value = int(combined)
+        words = num2words(number_value)
+    except:
+        words = combined
 
-            frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-            results = hands.process(frame_rgb)
-
-            if results and results.multi_hand_landmarks:
-                for hand_landmarks in results.multi_hand_landmarks:
-                    mp_drawing.draw_landmarks(frame, hand_landmarks, mp_hands.HAND_CONNECTIONS)
-
-            sequence.append(extract_landmark_features(results))
-
-            if gesture_model is not None and len(sequence) == SEQUENCE_LENGTH:
-                input_np = normalize_sequence(sequence)
-                input_tensor = torch.tensor(input_np, dtype=torch.float32, device=MODEL_DEVICE).unsqueeze(0)
-                with torch.no_grad():
-                    logits = gesture_model(input_tensor)
-                    pred_idx = int(torch.argmax(logits, dim=1).item())
-
-                if gesture_labels and pred_idx < len(gesture_labels):
-                    prediction_text = str(gesture_labels[pred_idx])
-                else:
-                    prediction_text = str(pred_idx)
-
-            if prediction_text:
-                cv2.putText(
-                    frame,
-                    f"Prediction: {prediction_text}",
-                    (10, 35),
-                    cv2.FONT_HERSHEY_SIMPLEX,
-                    1.0,
-                    (0, 255, 0),
-                    2,
-                    cv2.LINE_AA,
-                )
-            elif gesture_model is None:
-                cv2.putText(
-                    frame,
-                    "Model missing: train and place checkpoint at Model/artifacts/gesture_transformer.pth",
-                    (10, 35),
-                    cv2.FONT_HERSHEY_SIMPLEX,
-                    0.6,
-                    (0, 0, 255),
-                    2,
-                    cv2.LINE_AA,
-                )
-
-            ok, buffer = cv2.imencode('.jpg', frame)
-            if not ok:
-                continue
-
-            frame_bytes = buffer.tobytes()
-            yield (b'--frame\r\n' b'Content-Type: image/jpeg\r\n\r\n' + frame_bytes + b'\r\n')
-    finally:
-        cap.release()
-        if hands is not None:
-            hands.close()
-        CAMERA_STREAM_LOCK.release()
-
-
+    return jsonify({
+        "sequence": captured_sequence,
+        "combined": combined,
+        "words": words
+    })
 @app.route('/video_feed')
 def video_feed():
     return Response(generate_frames(), mimetype='multipart/x-mixed-replace; boundary=frame')
 
 
-@app.route('/camera_status')
-def camera_status():
-    if CAMERA_STREAM_LOCK.locked():
-        return jsonify({
-            "available": True,
-            "in_use": True,
-            "detail": "Camera stream already active.",
-        })
-
-    cap, active_index, active_backend, attempts = _open_working_camera()
-    if cap is None:
-        return jsonify({
-            "available": False,
-            "attempts": attempts[:18],
-            "detail": "OpenCV could not open any camera device.",
-        }), 503
-
-    cap.release()
-    return jsonify({
-        "available": True,
-        "in_use": False,
-        "index": active_index,
-        "backend": active_backend,
-        "attempts": attempts[:18],
-        "detail": "Camera is available to OpenCV.",
-    })
-
-
 if __name__ == '__main__':
-    app.run(debug=True, use_reloader=False)
+    app.run(debug=True)
