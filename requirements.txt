@@ -1,0 +1,15 @@
+# Full app + model requirements
+Flask~=3.0.2
+flask-mysqldb~=2.0.0
+Flask-WTF~=1.2.1
+WTForms~=3.1.2
+python-dotenv~=1.0.1
+nltk~=3.9.1
+opencv-python~=4.8.0.74
+mediapipe==0.10.14
+numpy~=1.26.4
+scikit-learn~=1.5.2
+torch~=2.5.1
+SpeechRecognition~=3.10.4
+pocketsphinx~=5.0.3
+vosk~=0.3.45
