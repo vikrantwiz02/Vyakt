@@ -1,7 +1,6 @@
 import cv2
 import os
 import requests
-os.environ["PATH"] += os.pathsep + "C:\\Users\\hp\\Downloads\\ffmpeg-8.1-essentials_build\\ffmpeg-8.1-essentials_build\\bin"
 import re
 import tempfile
 import json
@@ -13,7 +12,9 @@ from collections import deque
 from dotenv import load_dotenv
 import speech_recognition as sr
 from flask import Flask, render_template, redirect, request, url_for, flash, session, Response, g, jsonify
-from flask_mysqldb import MySQL
+from pymongo import MongoClient
+from datetime import datetime
+from bson.objectid import ObjectId
 from num2words import num2words
 from flask_wtf import FlaskForm
 from wtforms import StringField, PasswordField, SubmitField
@@ -30,8 +31,7 @@ is_capturing = False
 from Model.features import FEATURE_SIZE, SEQUENCE_LENGTH, extract_landmark_features, normalize_sequence
 from Model.gesture_model import GestureTransformer
 from pydub import AudioSegment
-AudioSegment.converter = "C:\\Users\\hp\\Downloads\\ffmpeg-8.1-essentials_build\\ffmpeg-8.1-essentials_build\\bin\\ffmpeg.exe"
-AudioSegment.ffprobe = "C:\\Users\\hp\\Downloads\\ffmpeg-8.1-essentials_build\\ffmpeg-8.1-essentials_build\\bin\\ffprobe.exe"
+
 
 # Load environment variables from .env file
 load_dotenv()
@@ -41,15 +41,11 @@ app = Flask(__name__)
 # Secret key for session management
 app.secret_key = os.getenv('FLASK_SECRET_KEY', 'dev_secret_key')
 
-# MySQL Configuration from environment variables
-app.config['MYSQL_HOST'] = os.getenv('MYSQL_HOST', 'localhost')
-app.config['MYSQL_USER'] = os.getenv('MYSQL_USER', 'root')
-app.config['MYSQL_PASSWORD'] = os.getenv('MYSQL_PASSWORD', '')
-app.config['MYSQL_DB'] = os.getenv('MYSQL_DB', 'sign_language_app')
-app.config['MYSQL_PORT'] = int(os.getenv('MYSQL_PORT', '3306'))
+# MongoDB Configuration
+mongo_uri = os.getenv('MONGO_URI', 'mongodb://localhost:27017/')
+mongo_client = MongoClient(mongo_uri)
+db = mongo_client['vyakt_db']
 app.config['GOOGLE_TRANSLATE_API_KEY'] = os.getenv('GOOGLE_TRANSLATE_API_KEY', '')
-
-mysql = MySQL(app)
 
 
 @app.context_processor
@@ -261,10 +257,17 @@ def register():
         email = form.email.data
         password = generate_password_hash(form.password.data)
 
-        cur = mysql.connection.cursor()
-        cur.execute("INSERT INTO users(username, email, password) VALUES(%s, %s, %s)", (username, email, password))
-        mysql.connection.commit()
-        cur.close()
+        existing_user = db.users.find_one({"email": email})
+        if existing_user:
+            flash('Email already registered', 'danger')
+            return redirect(url_for('register'))
+
+        db.users.insert_one({
+            "username": username,
+            "email": email,
+            "password": password,
+            "profile_picture": None
+        })
 
         flash('You are now registered and can log in', 'success')
         return redirect(url_for('login'))
@@ -277,36 +280,45 @@ def login():
         email = form.email.data
         password_candidate = form.password.data
 
-        cur = mysql.connection.cursor()
-        result = cur.execute("SELECT id, username, email, password FROM users WHERE email = %s", [email])
+        user = db.users.find_one({"email": email})
 
-        if result > 0:
-            data = cur.fetchone()
-            user_id, username, stored_email, stored_password = data
-
-            if check_password_hash(stored_password, password_candidate):
+        if user:
+            if check_password_hash(user['password'], password_candidate):
                 session['logged_in'] = True
-                session['username'] = username
-                session['email'] = stored_email
-                session['user_id'] = user_id
+                session['username'] = user['username']
+                session['email'] = user['email']
+                session['user_id'] = str(user['_id'])
                 
                 # Session and Login History
                 session_id = str(uuid.uuid4())
-                cur.execute("INSERT INTO sessions (session_id, user_id, created_at, last_active) VALUES (%s, %s, NOW(), NOW())", (session_id, user_id))
+                db.sessions.insert_one({
+                    "session_id": session_id,
+                    "user_id": str(user['_id']),
+                    "created_at": datetime.now(),
+                    "last_active": datetime.now()
+                })
+                
                 ip_address = request.remote_addr
-                cur.execute("INSERT INTO user_login_history (user_id, ip_address, successful) VALUES (%s, %s, %s)", (user_id, ip_address, 1))
-                cur.execute("INSERT INTO logs (user_id, activity_type, description) VALUES (%s, %s, %s)", (user_id, 'login', f'{username} logged in'))
-                mysql.connection.commit()
+                db.user_login_history.insert_one({
+                    "user_id": str(user['_id']),
+                    "ip_address": ip_address,
+                    "successful": 1
+                })
+                
+                db.logs.insert_one({
+                    "user_id": str(user['_id']),
+                    "activity_type": 'login',
+                    "description": f"{user['username']} logged in",
+                    "timestamp": datetime.now()
+                })
                 session['session_id'] = session_id
                 
                 flash('You are now logged in', 'success')
-                cur.close()
                 return redirect(url_for('index'))
             else:
                 flash('Invalid password', 'danger')
         else:
             flash('User not registered', 'danger')
-        cur.close()
     return render_template('login.html', form=form)
 
 @app.route('/logout')
@@ -315,19 +327,25 @@ def logout():
         user_id = session['user_id']
         username = session['username']
         
-        cur = mysql.connection.cursor()
-        cur.execute("INSERT INTO logs (user_id, activity_type, description) VALUES (%s, %s, %s)", (user_id, 'logout', f'{username} logged out'))
+        db.logs.insert_one({
+            "user_id": user_id, 
+            "activity_type": 'logout', 
+            "description": f'{username} logged out',
+            "timestamp": datetime.now()
+        })
         ip_address = request.remote_addr
-        cur.execute("INSERT INTO user_login_history (user_id, ip_address, successful) VALUES (%s, %s, %s)", (user_id, ip_address, 0))
-        mysql.connection.commit()
-        cur.close()
+        db.user_login_history.insert_one({
+            "user_id": user_id,
+            "ip_address": ip_address,
+            "successful": 0
+        })
 
     if 'session_id' in session:
         session_id = session['session_id']
-        cur = mysql.connection.cursor()
-        cur.execute("UPDATE sessions SET last_active = NOW() WHERE session_id = %s", (session_id,))
-        mysql.connection.commit()
-        cur.close()
+        db.sessions.update_one(
+            {"session_id": session_id},
+            {"$set": {"last_active": datetime.now()}}
+        )
         
     session.clear()
     flash('You have been successfully logged out!', 'success')
@@ -339,20 +357,17 @@ def profile():
         flash('Please log in to view your profile.', 'danger')
         return redirect(url_for('login'))
 
-    cur = mysql.connection.cursor()
-    cur.execute("SELECT id, username, email, profile_picture FROM users WHERE email = %s", [session['email']])
-    user = cur.fetchone()
-    cur.close()
+    user = db.users.find_one({"email": session['email']})
 
     if not user:
         flash('User not found.', 'danger')
         return redirect(url_for('logout'))
 
     user_data = {
-        'id': user[0],
-        'username': user[1],
-        'email': user[2],
-        'profile_picture': user[3]
+        'id': str(user['_id']),
+        'username': user.get('username', ''),
+        'email': user.get('email', ''),
+        'profile_picture': user.get('profile_picture')
     }
 
     if request.method == 'POST':
@@ -360,25 +375,25 @@ def profile():
         email = request.form.get('email')
         profile_picture = request.files.get('profile_picture')
 
-        cur = mysql.connection.cursor()
-        cur.execute("UPDATE users SET username = %s, email = %s WHERE email = %s", [username, email, session['email']])
-        mysql.connection.commit()
+        update_fields = {
+            "username": username,
+            "email": email
+        }
 
         if profile_picture:
-            # Ensure the upload directory exists
             upload_folder = os.path.join(app.root_path, 'static', 'uploads')
             os.makedirs(upload_folder, exist_ok=True)
             
             image_filename = secure_filename(profile_picture.filename)
-            # Save using absolute path
             profile_picture.save(os.path.join(upload_folder, image_filename))
-            
-            # Store relative path in DB (for url_for)
             db_path = f'uploads/{image_filename}'
-            cur.execute("UPDATE users SET profile_picture = %s WHERE email = %s", [db_path, session['email']])
-            mysql.connection.commit()
+            update_fields['profile_picture'] = db_path
 
-        cur.close()
+        db.users.update_one({"email": session['email']}, {"$set": update_fields})
+        
+        if email != session['email']:
+            session['email'] = email
+            
         flash('Profile updated successfully!', 'success')
         return redirect(url_for('profile'))
 
@@ -399,26 +414,17 @@ def settings():
             selected_theme = request.form.get('theme')
             session['theme'] = selected_theme
 
-            cur = mysql.connection.cursor()
-            cur.execute("SELECT settings_user_id FROM settings WHERE settings_user_id = (SELECT id FROM users WHERE email = %s)", [session['email']])
-            existing_settings = cur.fetchone()
-
-            if existing_settings:
-                cur.execute("UPDATE settings SET dark_mode = %s WHERE settings_user_id = %s", [selected_theme, existing_settings[0]])
-            else:
-                cur.execute("INSERT INTO settings (settings_user_id, dark_mode) VALUES ((SELECT id FROM users WHERE email = %s), %s)", [session['email'], selected_theme])
-            mysql.connection.commit()
-            cur.close()
+            db.settings.update_one(
+                {"settings_user_id": session['user_id']},
+                {"$set": {"dark_mode": selected_theme}},
+                upsert=True
+            )
 
             flash(f'Theme changed to {selected_theme}!', 'success')
             return redirect(url_for('settings'))
         
-        cur = mysql.connection.cursor()
-        cur.execute("SELECT dark_mode FROM settings WHERE settings_user_id = (SELECT id FROM users WHERE email = %s)", [session['email']])
-        theme = cur.fetchone()
-        cur.close()
-
-        current_theme = theme[0] if theme else session.get('theme', 'default')
+        theme_record = db.settings.find_one({"settings_user_id": session['user_id']})
+        current_theme = theme_record.get('dark_mode') if theme_record else session.get('theme', 'default')
 
         return render_template('settings.html', username=session['username'], theme=current_theme)
 
@@ -446,10 +452,12 @@ def feedback():
         if rating == '':
             rating = None
             
-        cur = mysql.connection.cursor()
-        cur.execute("INSERT INTO feedback(feedback_user_id, message, rating) VALUES(%s, %s, %s)", (session['user_id'], feedback_text, rating))
-        mysql.connection.commit()
-        cur.close()
+        db.feedback.insert_one({
+            "feedback_user_id": session['user_id'],
+            "message": feedback_text,
+            "rating": rating,
+            "timestamp": datetime.now()
+        })
 
         flash('Your feedback has been submitted!', 'success')
         return redirect(url_for('feedback'))
@@ -464,21 +472,18 @@ def contact():
 
     if request.method == 'POST':
         message = request.form['message']
-        username = session['username']
         
-        cur = mysql.connection.cursor()
-        cur.execute("SELECT id FROM users WHERE username = %s", (username,))
-        user = cur.fetchone()
-        
-        if user:
-            user_id = user[0]
-            cur.execute("INSERT INTO contact (customer_id, message) VALUES (%s, %s)", (user_id, message))
-            mysql.connection.commit()
+        user_id = session.get('user_id')
+        if user_id:
+            db.contact.insert_one({
+                "customer_id": user_id, 
+                "message": message,
+                "timestamp": datetime.now()
+            })
             flash('Your message has been sent!', 'success')
         else:
             flash('User not found. Please log in again.', 'danger')
 
-        cur.close()
         return redirect(url_for('contact'))
 
     return render_template('contact.html', username=session['username'])

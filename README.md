@@ -1,6 +1,6 @@
 # Vyakt
 
-![Vyakt Logo](static/images/Vyakt.png)
+![Vyakt Logo](static/images/VyaktLogo.png)
 
 **Vyakt** is a two-way sign language translator that breaks communication barriers using technology. It translates sign language gestures to text in real-time and converts text input into sign language animations.
 
