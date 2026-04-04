@@ -3,7 +3,7 @@
 
 <head>
   <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
   <title>{% block title %}Vyakt - Sign Language Translator{% endblock %}</title>
 
   <!-- Google Fonts: Outfit (Headings) & Inter (Body) -->
@@ -14,12 +14,20 @@
 
   <!-- Global CSS -->
   <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
+  <!-- PWA Manifest -->
+  <link rel="manifest" href="{{ url_for('static', filename='manifest.json') }}">
+  <meta name="theme-color" content="#0f172a">
+  <link rel="icon" type="image/png" sizes="192x192" href="{{ url_for('static', filename='icons/icon-192.png') }}">
 
   <!-- Page Specific CSS -->
   {% block extra_css %}{% endblock %}
 </head>
 
 <body>
+  <div id="appLoadingOverlay" class="app-loading-overlay" role="status" aria-live="polite">
+    <div class="app-loading-card">Initializing AI Model...</div>
+  </div>
+
   <div class="wrapper">
     <header>
       <nav class="navbar">
@@ -88,6 +96,10 @@
       <p>&copy; 2026 Vyakt. Breaking Barriers with Technology.</p>
     </footer>
   </div>
+
+  <button id="installAppBtn" class="pwa-install-btn hidden" type="button" aria-label="Install App">
+    Install App
+  </button>
 
   <!-- Global JS -->
   <script src="{{ url_for('static', filename='js/main.js') }}"></script>

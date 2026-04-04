@@ -6,6 +6,8 @@
     const cameraVideo = document.getElementById('cameraVideo');
     const cameraCanvas = document.getElementById('cameraCanvas');
     const annotatedFeed = document.getElementById('annotatedFeed');
+    const cameraInitState = document.getElementById('cameraInitState');
+    const cameraActiveIndicator = document.getElementById('cameraActiveIndicator');
 
     const predictedText = document.getElementById('predictedText');
     const predictionConfidence = document.getElementById('predictionConfidence');
@@ -20,6 +22,7 @@
     let lastSpoken = "";
     let stopInProgress = false;
     let mediaStream = null;
+    let cameraStarting = false;
     let sending = false;
     let frameTimer = null;
 
@@ -37,6 +40,28 @@
     function hideLivePrediction() {
         predictedText.innerText = "";
         predictionConfidence.innerText = "";
+    }
+
+    function setCameraStatus(mode, message = "") {
+        if (!cameraInitState || !cameraActiveIndicator) return;
+
+        if (mode === 'initializing') {
+            cameraInitState.classList.remove('hidden');
+            cameraInitState.innerText = message || 'Initializing Camera...';
+            cameraActiveIndicator.classList.add('hidden');
+            return;
+        }
+
+        if (mode === 'active') {
+            cameraInitState.classList.add('hidden');
+            cameraActiveIndicator.classList.remove('hidden');
+            return;
+        }
+
+        // idle / error fallback
+        cameraInitState.classList.remove('hidden');
+        cameraInitState.innerText = message || 'Camera is off';
+        cameraActiveIndicator.classList.add('hidden');
     }
 
     // 🌍 MULTILINGUAL SPEAK
@@ -134,6 +159,12 @@
 
     // 🎥 START CAMERA
     startCameraButton.addEventListener('click', async () => {
+        if (cameraStarting || mediaStream) {
+            return;
+        }
+        cameraStarting = true;
+        startCameraButton.disabled = true;
+        setCameraStatus('initializing', 'Initializing Camera...');
 
         try {
             await fetch('/reset_capture_state', { method: 'POST' });
@@ -146,7 +177,7 @@
                 audio: false
             });
         } catch (err) {
-            alert("Camera error: " + err.message);
+            alert('Camera permission denied or not available: ' + err.message);
             return;
         }
 
@@ -158,7 +189,10 @@
         startCapture.style.display = 'inline-flex';
         stopCapture.style.display = 'inline-flex';
 
-        cameraVideo.onloadeddata = () => sendFrame();
+        // Wait for video to actually start playing before sending frames
+        cameraVideo.onloadeddata = () => {
+            sendFrame();
+        };
     });
 
     // ❌ CLOSE CAMERA
@@ -174,8 +208,10 @@
         cameraVideo.srcObject = null;
         annotatedFeed.style.display = 'none';
         cameraFeedContainer.style.display = 'none';
+        setCameraStatus('idle', 'Camera is off');
 
         startCameraButton.style.display = 'inline-flex';
+        startCameraButton.disabled = false;
         closeCameraButton.style.display = 'none';
         startCapture.style.display = 'none';
         stopCapture.style.display = 'none';
@@ -188,6 +224,7 @@
         hideLivePrediction();
         finalText.innerText = '';
         lastSpoken = '';
+        cameraStarting = false;
     });
 
     // ▶ START CAPTURE
