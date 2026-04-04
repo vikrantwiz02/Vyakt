@@ -13,12 +13,25 @@ document.addEventListener('DOMContentLoaded', () => {
     const startCapture = document.getElementById('startCapture');
     const stopCapture = document.getElementById('stopCapture');
 
-    let frameInterval = null;
     let currentAudio = null;
     let lastSpoken = "";
     let stopInProgress = false;
     let mediaStream = null;
     let sending = false;
+    let frameTimer = null;
+
+    const MAX_UPLOAD_WIDTH = 512;
+    const MAX_UPLOAD_HEIGHT = 384;
+    const MIN_FRAME_DELAY_MS = 100;
+    const MAX_FRAME_DELAY_MS = 300;
+    const DEFAULT_FRAME_DELAY_MS = 140;
+
+    function scheduleNextFrame(delayMs = DEFAULT_FRAME_DELAY_MS) {
+        if (frameTimer) {
+            clearTimeout(frameTimer);
+        }
+        frameTimer = setTimeout(sendFrame, Math.max(0, delayMs));
+    }
 
     function hideLivePrediction() {
         predictedText.innerText = "";
@@ -48,12 +61,24 @@ document.addEventListener('DOMContentLoaded', () => {
     async function sendFrame() {
         if (sending || !cameraVideo.videoWidth) return;
         sending = true;
+        const startedAt = performance.now();
 
         try {
-            cameraCanvas.width = cameraVideo.videoWidth;
-            cameraCanvas.height = cameraVideo.videoHeight;
+            const scale = Math.min(
+                MAX_UPLOAD_WIDTH / cameraVideo.videoWidth,
+                MAX_UPLOAD_HEIGHT / cameraVideo.videoHeight,
+                1
+            );
+            const uploadWidth = Math.max(1, Math.round(cameraVideo.videoWidth * scale));
+            const uploadHeight = Math.max(1, Math.round(cameraVideo.videoHeight * scale));
+
+            if (cameraCanvas.width !== uploadWidth || cameraCanvas.height !== uploadHeight) {
+                cameraCanvas.width = uploadWidth;
+                cameraCanvas.height = uploadHeight;
+            }
+
             const ctx = cameraCanvas.getContext('2d');
-            ctx.drawImage(cameraVideo, 0, 0);
+            ctx.drawImage(cameraVideo, 0, 0, uploadWidth, uploadHeight);
             const dataUrl = cameraCanvas.toDataURL('image/jpeg', 0.7);
 
             const res = await fetch('/process_frame', {
@@ -88,6 +113,14 @@ document.addEventListener('DOMContentLoaded', () => {
             hideLivePrediction();
         } finally {
             sending = false;
+            const elapsed = performance.now() - startedAt;
+            const nextDelay = Math.min(
+                MAX_FRAME_DELAY_MS,
+                Math.max(MIN_FRAME_DELAY_MS, Math.round(elapsed * 1.15))
+            );
+            if (mediaStream) {
+                scheduleNextFrame(nextDelay);
+            }
         }
     }
 
@@ -99,7 +132,12 @@ document.addEventListener('DOMContentLoaded', () => {
 
         try {
             mediaStream = await navigator.mediaDevices.getUserMedia({
-                video: { facingMode: 'user', width: { ideal: 640 }, height: { ideal: 480 } },
+                video: {
+                    facingMode: 'user',
+                    width: { ideal: 640, max: 960 },
+                    height: { ideal: 480, max: 720 },
+                    frameRate: { ideal: 24, max: 30 },
+                },
                 audio: false,
             });
         } catch (err) {
@@ -118,14 +156,14 @@ document.addEventListener('DOMContentLoaded', () => {
 
         // Wait for video to actually start playing before sending frames
         cameraVideo.onloadeddata = () => {
-            frameInterval = setInterval(sendFrame, 200);
+            sendFrame();
         };
     });
 
     closeCameraButton.addEventListener('click', () => {
-        if (frameInterval) {
-            clearInterval(frameInterval);
-            frameInterval = null;
+        if (frameTimer) {
+            clearTimeout(frameTimer);
+            frameTimer = null;
         }
 
         if (mediaStream) {

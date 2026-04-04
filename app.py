@@ -1556,6 +1556,14 @@ CAMERA_INDEX = int(os.getenv("Vyakt_CAMERA_INDEX", "0"))
 CAMERA_BACKEND = cv2.CAP_DSHOW if os.name == "nt" else cv2.CAP_ANY
 PREDICTION_CONFIDENCE_THRESHOLD = float(os.getenv("Vyakt_CONFIDENCE_THRESHOLD", "0.70"))
 UNKNOWN_CONFIDENCE_THRESHOLD = float(os.getenv("Vyakt_UNKNOWN_THRESHOLD", "0.50"))
+FRAME_MAX_WIDTH = int(os.getenv("Vyakt_FRAME_MAX_WIDTH", "512"))
+FRAME_MAX_HEIGHT = int(os.getenv("Vyakt_FRAME_MAX_HEIGHT", "384"))
+ANNOTATED_JPEG_QUALITY = int(os.getenv("Vyakt_ANNOTATED_JPEG_QUALITY", "82"))
+MAX_HANDS = int(os.getenv("Vyakt_MAX_HANDS", "2"))
+HAND_MIN_SPAN = float(os.getenv("Vyakt_HAND_MIN_SPAN", "0.08"))
+HAND_STABLE_FRAMES = int(os.getenv("Vyakt_HAND_STABLE_FRAMES", "2"))
+NO_HAND_RESET_FRAMES = int(os.getenv("Vyakt_NO_HAND_RESET_FRAMES", "2"))
+SHOW_FRAME_OVERLAY = os.getenv("Vyakt_SHOW_FRAME_OVERLAY", "0").strip().lower() in {"1", "true", "yes", "on"}
 
 
 def load_gesture_model():
@@ -1655,24 +1663,44 @@ def _yield_error_stream(message: str):
 
 _frame_sequence = deque(maxlen=model_sequence_length)
 _frame_last_added = ""
+_mp_lock = threading.Lock()
+_hand_streak = 0
+_no_hand_streak = 0
 
 try:
     from mediapipe import solutions as _mp_solutions
     _mp_hands_module = _mp_solutions.hands
     _mp_drawing = _mp_solutions.drawing_utils
     _mp_hands = _mp_hands_module.Hands(
-        static_image_mode=True,
-        min_detection_confidence=0.5,
-        max_num_hands=2,
+        static_image_mode=False,
+        model_complexity=0,
+        min_detection_confidence=0.6,
+        min_tracking_confidence=0.6,
+        max_num_hands=MAX_HANDS,
     )
 except ImportError:
     _mp_hands = None
     _mp_drawing = None
 
 
+def _has_valid_hand_span(results) -> bool:
+    if not results or not results.multi_hand_landmarks:
+        return False
+
+    for hand_landmarks in results.multi_hand_landmarks:
+        xs = [point.x for point in hand_landmarks.landmark]
+        ys = [point.y for point in hand_landmarks.landmark]
+        if not xs or not ys:
+            continue
+        span = max(max(xs) - min(xs), max(ys) - min(ys))
+        if span >= HAND_MIN_SPAN:
+            return True
+    return False
+
+
 @app.route('/process_frame', methods=['POST'])
 def process_frame():
-    global latest_prediction, is_capturing, captured_sequence, _frame_last_added
+    global latest_prediction, is_capturing, captured_sequence, _frame_last_added, _hand_streak, _no_hand_streak
 
     if _mp_hands is None:
         return jsonify({"error": "mediapipe not available"}), 500
@@ -1693,24 +1721,56 @@ def process_frame():
     except Exception:
         return jsonify({"error": "invalid image data"}), 400
 
+    if FRAME_MAX_WIDTH > 0 and FRAME_MAX_HEIGHT > 0:
+        frame_h, frame_w = frame.shape[:2]
+        scale = min(FRAME_MAX_WIDTH / frame_w, FRAME_MAX_HEIGHT / frame_h, 1.0)
+        if scale < 1.0:
+            resized_w = max(1, int(frame_w * scale))
+            resized_h = max(1, int(frame_h * scale))
+            frame = cv2.resize(frame, (resized_w, resized_h), interpolation=cv2.INTER_AREA)
+
     frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-    results = _mp_hands.process(frame_rgb)
+    with _mp_lock:
+        results = _mp_hands.process(frame_rgb)
 
     # Draw hand landmarks on the frame
     if results and results.multi_hand_landmarks and _mp_drawing:
+        connection_spec = _mp_drawing.DrawingSpec(color=(0, 180, 255), thickness=1, circle_radius=1)
+        landmark_spec = _mp_drawing.DrawingSpec(color=(80, 255, 80), thickness=1, circle_radius=1)
         for hand_landmarks in results.multi_hand_landmarks:
-            _mp_drawing.draw_landmarks(frame, hand_landmarks, _mp_hands_module.HAND_CONNECTIONS)
+            _mp_drawing.draw_landmarks(
+                frame,
+                hand_landmarks,
+                _mp_hands_module.HAND_CONNECTIONS,
+                landmark_drawing_spec=landmark_spec,
+                connection_drawing_spec=connection_spec,
+            )
 
     current_features = extract_landmark_features(results)
-    has_hand_landmarks = bool(results and results.multi_hand_landmarks)
-    no_hand_frame = (not has_hand_landmarks) or is_no_hand_feature_vector(current_features)
+    has_valid_hand = _has_valid_hand_span(results)
+    if has_valid_hand:
+        _hand_streak += 1
+        _no_hand_streak = 0
+    else:
+        _no_hand_streak += 1
+        _hand_streak = 0
+
+    hand_is_stable = _hand_streak >= max(1, HAND_STABLE_FRAMES)
+    no_hand_frame = (
+        (not has_valid_hand)
+        or (not hand_is_stable)
+        or is_no_hand_feature_vector(current_features)
+    )
 
     prediction_text = ""
     prediction_confidence = 0.0
 
     if no_hand_frame:
-        _frame_sequence.clear()
-        latest_prediction = {"text": "", "confidence": 0.0, "state": "no_hand"}
+        if _no_hand_streak >= max(1, NO_HAND_RESET_FRAMES):
+            _frame_sequence.clear()
+            latest_prediction = {"text": "", "confidence": 0.0, "state": "no_hand"}
+        else:
+            latest_prediction = {"text": "", "confidence": 0.0, "state": "transition"}
     else:
         _frame_sequence.append(current_features)
         latest_prediction = {"text": "Identifying", "confidence": 0.0, "state": "identifying"}
@@ -1754,22 +1814,32 @@ def process_frame():
                         captured_sequence.append(prediction_text)
                         _frame_last_added = prediction_text
 
-    # Draw prediction overlay on the frame
-    if prediction_text:
+    # Optional in-frame overlay; UI already shows prediction and confidence below the feed.
+    if SHOW_FRAME_OVERLAY and prediction_text:
         overlay_confidence = int(round(prediction_confidence * 100))
+        overlay_label = f"{prediction_text}  {overlay_confidence}%"
+        (text_w, text_h), baseline = cv2.getTextSize(overlay_label, cv2.FONT_HERSHEY_SIMPLEX, 0.55, 1)
+        box_x, box_y = 10, 12
+        box_w = text_w + 14
+        box_h = text_h + baseline + 12
+
+        overlay = frame.copy()
+        cv2.rectangle(overlay, (box_x, box_y), (box_x + box_w, box_y + box_h), (20, 20, 20), -1)
+        cv2.addWeighted(overlay, 0.35, frame, 0.65, 0, frame)
         cv2.putText(
             frame,
-            f"Prediction: {prediction_text} ({overlay_confidence}%)",
-            (10, 35),
+            overlay_label,
+            (box_x + 7, box_y + box_h - 7),
             cv2.FONT_HERSHEY_SIMPLEX,
-            1.0,
-            (0, 255, 0),
-            2,
+            0.55,
+            (210, 255, 210),
+            1,
             cv2.LINE_AA,
         )
 
     # Encode annotated frame as base64 JPEG
-    ok, buffer = cv2.imencode('.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, 80])
+    jpeg_quality = max(40, min(95, ANNOTATED_JPEG_QUALITY))
+    ok, buffer = cv2.imencode('.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, jpeg_quality])
     annotated_b64 = ""
     if ok:
         annotated_b64 = "data:image/jpeg;base64," + base64.b64encode(buffer.tobytes()).decode('ascii')
@@ -1781,9 +1851,11 @@ def process_frame():
 
 @app.route('/reset_frame_state', methods=['POST'])
 def reset_frame_state():
-    global _frame_last_added
+    global _frame_last_added, _hand_streak, _no_hand_streak
     _frame_sequence.clear()
     _frame_last_added = ""
+    _hand_streak = 0
+    _no_hand_streak = 0
     return jsonify({"status": "ok"})
 
 
