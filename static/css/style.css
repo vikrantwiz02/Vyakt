@@ -87,6 +87,7 @@ body {
     color: var(--text-color);
     font-family: var(--font-body);
     line-height: 1.6;
+    overflow-x: hidden;
     transition: background-color var(--transition), color var(--transition);
 }
 
@@ -377,6 +378,49 @@ main {
     display: none !important;
 }
 
+/* PWA Install CTA */
+.pwa-install-btn {
+    position: fixed;
+    right: 20px;
+    bottom: 20px;
+    z-index: 2500;
+    padding: 0.7rem 1rem;
+    border: none;
+    border-radius: var(--radius-full);
+    font-weight: 700;
+    color: #ffffff;
+    background: linear-gradient(135deg, #0ea5e9, #8b5cf6);
+    box-shadow: 0 10px 24px rgba(14, 165, 233, 0.28);
+    transition: transform 0.2s ease, box-shadow 0.2s ease;
+}
+
+.pwa-install-btn:hover {
+    transform: translateY(-2px);
+    box-shadow: 0 14px 28px rgba(14, 165, 233, 0.34);
+}
+
+/* Global app-loading overlay */
+.app-loading-overlay {
+    position: fixed;
+    inset: 0;
+    z-index: 2600;
+    display: grid;
+    place-items: center;
+    background: rgba(15, 23, 42, 0.58);
+    backdrop-filter: blur(4px);
+    -webkit-backdrop-filter: blur(4px);
+}
+
+.app-loading-card {
+    background: var(--card-bg);
+    color: var(--text-color);
+    border: 1px solid var(--card-border);
+    border-radius: var(--radius-md);
+    box-shadow: var(--card-shadow);
+    padding: 0.9rem 1.2rem;
+    font-weight: 600;
+}
+
 /* Responsive */
 @media (max-width: 768px) {
     .navbar {
@@ -388,6 +432,13 @@ main {
     .nav-links {
         flex-wrap: wrap;
         justify-content: center;
+    }
+
+    .pwa-install-btn {
+        right: 12px;
+        bottom: 12px;
+        font-size: 0.9rem;
+        padding: 0.62rem 0.92rem;
     }
 }
 

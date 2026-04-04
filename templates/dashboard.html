@@ -116,9 +116,11 @@
 
         <div class="card camera-box">
             <h2 style="color: var(--primary-color);">Camera Feed</h2>
-
-            <div style="position:relative;">
-                <!-- Live Camera -->
+            <div class="camera-status-row">
+                <span id="cameraInitState" class="camera-init-state">Initializing Camera...</span>
+                <span id="cameraActiveIndicator" class="camera-active-indicator hidden">Camera Active</span>
+            </div>
+            <div class="camera-media-wrap">
                 <video id="cameraVideo" autoplay playsinline muted class="camera-feed-img"></video>
 
                 <!-- AI Overlay -->
