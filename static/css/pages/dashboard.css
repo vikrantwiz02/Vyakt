@@ -42,3 +42,10 @@
     border: 2px solid var(--card-border);
     box-shadow: var(--card-shadow);
 }
+
+#annotatedFeed {
+    transition: opacity 120ms ease-out;
+    image-rendering: auto;
+    backface-visibility: hidden;
+    transform: translateZ(0);
+}
