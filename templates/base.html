@@ -28,11 +28,16 @@
             style="height: 40px; width: auto; vertical-align: middle;"> Vyakt
         </a>
 
-        <div class="nav-links" id="nav-links">
-          <a href="{{ url_for('index') }}" class="nav-link">Home</a>
-          <a href="{{ url_for('about') }}" class="nav-link">About</a>
-          <a href="{{ url_for('feedback') }}" class="nav-link">Feedback</a>
-          <a href="{{ url_for('contact') }}" class="nav-link">Contact</a>
+      <div class="nav-links" id="nav-links">
+  <a href="{{ url_for('index') }}" class="nav-link">Home</a>
+  <a href="{{ url_for('about') }}" class="nav-link">About</a>
+
+  {% if session.get('username') %}
+    <a href="{{ url_for('learning') }}" class="nav-link">Quest</a>
+  {% endif %}
+
+  <a href="{{ url_for('feedback') }}" class="nav-link">Feedback</a>
+  <a href="{{ url_for('contact') }}" class="nav-link">Contact</a>
 
           {% if session.get('username') %}
           <!-- User Dropdown -->
